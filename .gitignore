@@ -1,0 +1,7 @@
+**/__pycache__/
+*.py[cod]
+build/
+.pytest_cache/
+*.egg-info/
+dist/
+hardware_validation/results/
