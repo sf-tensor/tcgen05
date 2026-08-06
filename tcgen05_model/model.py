@@ -758,7 +758,7 @@ class Tcgen05RawWindowNvfp4MmaModel(_Tcgen05RawWindowMmaModel):
             return F32_NEG_INF
         assert isinstance(c, tuple)
         if max_product_raw is None:
-            return case.c
+            return F32_POS_ZERO if (case.c & 0x7FFF_FFFF) == 0 else case.c
 
         raw_exponents: list[int] = []
         raw_exponents.append(max_product_raw)
@@ -916,7 +916,7 @@ class Tcgen05BlockScaledMmaModel(_Tcgen05RawWindowMmaModel):
 
         assert isinstance(c, tuple)
         if max_product_raw is None:
-            return case.c
+            return F32_POS_ZERO if (case.c & 0x7FFF_FFFF) == 0 else case.c
 
         raw_exponents: list[int] = [max_product_raw]
         if c[0] != 0:
@@ -1154,6 +1154,10 @@ FORMAT_MODELS = {
     "e2m1": Tcgen05RawWindowFp4E2M1MmaModel,
 }
 
+F16_INPUT_FORMATS = frozenset(("bf16", "f16"))
+F8F6F4_INPUT_FORMATS = frozenset(("e4m3", "e5m2", "e2m3", "e3m2", "e2m1"))
+
+
 def normalize_format(name: str) -> str:
     """Return the canonical short name used by this package."""
 
@@ -1177,7 +1181,7 @@ def make_model(
     d_type: str = "f32",
     saturate: bool = False,
     scaling: str | None = None,
-    scale_vec: int = 4,
+    scale_vec: int | None = None,
     sparse: bool = False,
     kind: str | None = None,
 ) -> ScalarModel:
@@ -1193,7 +1197,15 @@ def make_model(
     d_type = d_type.lower()
     kind = None if kind is None else kind.lower()
 
+    known_formats = frozenset(("tf32", *F16_INPUT_FORMATS, *F8F6F4_INPUT_FORMATS, "u8", "s8"))
+    if a_format not in known_formats or b_format not in known_formats:
+        raise ValueError(f"unsupported input format combination: {a_format}/{b_format}")
+    if d_type not in ("f16", "f32", "s32"):
+        raise ValueError(f"unsupported C/D type: {d_type!r}")
+
     if a_format in ("u8", "s8") or b_format in ("u8", "s8"):
+        if scaling is not None or kind is not None or scale_vec is not None:
+            raise ValueError("kind::i8 does not use block scaling")
         if a_format not in ("u8", "s8") or b_format not in ("u8", "s8") or d_type != "s32":
             raise ValueError("kind::i8 requires U8/S8 A and B with S32 C/D")
         return Tcgen05I8S32MmaModel(a_type=a_format, b_type=b_format, saturate=saturate)
@@ -1204,6 +1216,23 @@ def make_model(
     if scaling is None:
         if kind is not None:
             raise ValueError("kind is only used by block-scaled MMA")
+        if scale_vec is not None:
+            raise ValueError("scale_vec is only used by block-scaled MMA")
+        if a_format == "tf32" or b_format == "tf32":
+            if a_format != "tf32" or b_format != "tf32" or d_type != "f32":
+                raise ValueError("kind::tf32 requires TF32 A/B and F32 C/D")
+        elif a_format in F16_INPUT_FORMATS or b_format in F16_INPUT_FORMATS:
+            if a_format != b_format or a_format not in F16_INPUT_FORMATS:
+                raise ValueError("B200 kind::f16 requires matching BF16/BF16 or F16/F16 A/B")
+            if d_type == "f16" and a_format != "f16":
+                raise ValueError("B200 kind::f16 permits F16 C/D only with F16 A/B")
+            if d_type not in ("f16", "f32"):
+                raise ValueError("kind::f16 requires F16 or F32 C/D")
+        elif a_format in F8F6F4_INPUT_FORMATS and b_format in F8F6F4_INPUT_FORMATS:
+            if d_type not in ("f16", "f32"):
+                raise ValueError("kind::f8f6f4 requires F16 or F32 C/D")
+        else:
+            raise ValueError(f"unsupported floating-point descriptor: {a_format}/{b_format}/{d_type}")
         if d_type == "f32" and a_format == b_format and a_format in FORMAT_MODELS:
             return FORMAT_MODELS[a_format]()
         return Tcgen05MixedRawWindowMmaModel(a_format, b_format, d_type=d_type)
@@ -1212,10 +1241,10 @@ def make_model(
     if scaling == "ue4m3":
         if kind not in (None, "nvfp4", "mxf4nvf4"):
             raise ValueError("UE4M3 scaling is only valid for the NVFP4 family")
+        scale_vec = 4 if scale_vec is None else scale_vec
         if a_format != "e2m1" or b_format != "e2m1" or d_type != "f32" or scale_vec != 4:
             raise ValueError("UE4M3 scaling models NVFP4 E2M1/E2M1, F32 D, scale_vec::4X")
-        block = 32 if sparse else 16
-        return Tcgen05RawWindowNvfp4MmaModel(c_merge_group_size=block, scale_block_size=block)
+        return Tcgen05RawWindowNvfp4MmaModel()
 
     if scaling != "ue8m0":
         raise ValueError(f"unsupported scale format: {scaling!r}")
@@ -1223,11 +1252,21 @@ def make_model(
         raise ValueError(f"unsupported block-scaled kind: {kind!r}")
     if d_type != "f32":
         raise ValueError("block-scaled model currently supports F32 C/D")
-    if kind in ("mxf4", "mxf4nvf4") and (a_format != "e2m1" or b_format != "e2m1"):
-        raise ValueError(f"{kind} requires E2M1 A and B")
-    if kind == "mxf8f6f4" or (
-        kind is None and a_format == b_format and a_format in ("e4m3", "e5m2", "e2m3", "e3m2")
-    ):
+    if kind is None:
+        if (
+            a_format in F8F6F4_INPUT_FORMATS
+            and b_format in F8F6F4_INPUT_FORMATS
+            and (a_format != "e2m1" or b_format != "e2m1")
+        ):
+            kind = "mxf8f6f4"
+        else:
+            raise ValueError("kind is required for ambiguous UE8M0 descriptors")
+    if kind == "mxf8f6f4":
+        scale_vec = 1 if scale_vec is None else scale_vec
+        if scale_vec != 1:
+            raise ValueError("MXF8F6F4 UE8M0 requires scale_vec::1X")
+        if a_format not in F8F6F4_INPUT_FORMATS or b_format not in F8F6F4_INPUT_FORMATS:
+            raise ValueError("MXF8F6F4 requires f8/f6/f4 A and B")
         classes = {
             "e4m3": Tcgen05BlockScaledMxf8f6f4E4M3MmaModel,
             "e5m2": Tcgen05BlockScaledMxf8f6f4E5M2MmaModel,
@@ -1246,22 +1285,17 @@ def make_model(
                 use_c_dominant_merge=False,
             )
         return classes[a_format]()
-    if a_format == b_format == "e2m1":
-        if kind not in (None, "mxf4", "mxf4nvf4"):
-            raise ValueError(f"unsupported E2M1 block-scaled kind: {kind!r}")
+    if kind in ("mxf4", "mxf4nvf4"):
+        if a_format != "e2m1" or b_format != "e2m1":
+            raise ValueError(f"{kind} requires E2M1 A and B")
+        scale_vec = 2 if scale_vec is None else scale_vec
+        if kind == "mxf4":
+            if scale_vec != 2:
+                raise ValueError("MXF4 UE8M0 requires scale_vec::2X")
+            return Tcgen05BlockScaledMxf4E2M1MmaModel()
         if scale_vec == 2:
             return Tcgen05BlockScaledMxf4Nvfp4E2M1Scale2XMmaModel()
         if scale_vec == 4:
-            if kind == "mxf4":
-                return Tcgen05BlockScaledMxf4E2M1MmaModel()
             return Tcgen05BlockScaledMxf4Nvfp4E2M1Scale4XMmaModel()
-        raise ValueError("E2M1 UE8M0 scaling requires scale_vec 2 or 4")
-    return Tcgen05BlockScaledMmaModel(
-        input_decoder=_tcgen05_decoder_for_format(a_format),
-        input_decoder_b=_tcgen05_decoder_for_format(b_format),
-        scale_block_size=32,
-        c_merge_group_size=32,
-        product_window_fraction_bits=25,
-        scale_floor_offset=1000,
-        use_c_dominant_merge=False,
-    )
+        raise ValueError("MXF4NVF4 UE8M0 requires scale_vec::2X or scale_vec::4X")
+    raise ValueError(f"unsupported block-scaled descriptor: {kind}/{a_format}/{b_format}")

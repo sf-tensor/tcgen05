@@ -28,16 +28,21 @@ def sparse_active_indices(
     k: int,
     metadata: int | Sequence[int],
     *,
+    kind: str | None = None,
     nvfp4: bool = False,
 ) -> frozenset[int]:
     """Decode tcgen05 sparse-A metadata into logical K indices.
 
     TF32 selects one value from each pair. BF16/F16/f8/f6/f4 select two
-    values from each four-wide chunk. NVFP4 selects two adjacent pairs from
-    each eight-wide chunk.
+    values from each four-wide chunk. ``kind="mxf4"``, ``"mxf4nvf4"``, or
+    ``"nvfp4"`` selects two adjacent pairs from each eight-wide chunk.
     """
 
     format_name = normalize_format(format_name)
+    kind = None if kind is None else kind.lower()
+    if kind not in (None, "mxf8f6f4", "mxf4", "mxf4nvf4", "nvfp4"):
+        raise ValueError(f"unsupported sparse metadata kind: {kind!r}")
+    pairwise = nvfp4 or kind in ("mxf4", "mxf4nvf4", "nvfp4")
     words = (metadata,) if isinstance(metadata, int) else tuple(metadata)
     if not words or any(not 0 <= word <= 0xFFFF_FFFF for word in words):
         raise ValueError("metadata must contain uint32 words")
@@ -47,7 +52,7 @@ def sparse_active_indices(
         chunks = (k + 1) // 2
         legal = SPARSE_TF32_SELECTORS
     else:
-        chunk_size = 8 if nvfp4 else 4
+        chunk_size = 8 if pairwise else 4
         chunks = (k + chunk_size - 1) // chunk_size
         legal = SPARSE_2OF4_SELECTORS
     if isinstance(metadata, int):
@@ -64,7 +69,7 @@ def sparse_active_indices(
             active.add(chunk * 2 + (selector == 0xE))
             continue
         first, second = selector & 3, (selector >> 2) & 3
-        if nvfp4:
+        if pairwise:
             active.update((chunk * 8 + first * 2, chunk * 8 + first * 2 + 1))
             active.update((chunk * 8 + second * 2, chunk * 8 + second * 2 + 1))
         else:
@@ -83,7 +88,7 @@ def mma_dot(
     d_type: str = "f32",
     saturate: bool = False,
     scaling: str | None = None,
-    scale_vec: int = 4,
+    scale_vec: int | None = None,
     kind: str | None = None,
     scale_a: Sequence[int] | None = None,
     scale_b: Sequence[int] | None = None,
@@ -105,10 +110,15 @@ def mma_dot(
             a_format,
             len(a_words),
             sparse_metadata,
-            nvfp4=(scaling or "").lower() == "ue4m3",
+            kind="nvfp4" if (scaling or "").lower() == "ue4m3" else kind,
         )
-        a_words = tuple(word if index in active else 0 for index, word in enumerate(a_words))
-        b_words = tuple(word if index in active else 0 for index, word in enumerate(b_words))
+        if scaling is None:
+            a_words = tuple(word if index in active else 0 for index, word in enumerate(a_words))
+            b_words = tuple(word if index in active else 0 for index, word in enumerate(b_words))
+        else:
+            logical_indices = tuple(sorted(active))
+            a_words = tuple(a_words[index] for index in logical_indices)
+            b_words = tuple(b_words[index] for index in logical_indices)
     selected_model = model or make_model(
         a_format,
         b_format,
@@ -116,7 +126,7 @@ def mma_dot(
         saturate=saturate,
         scaling=scaling,
         scale_vec=scale_vec,
-        sparse=sparse,
+        sparse=False if scaling is not None else sparse,
         kind=kind,
     )
     return selected_model.eval(
@@ -140,7 +150,7 @@ def mma(
     d_type: str = "f32",
     saturate: bool = False,
     scaling: str | None = None,
-    scale_vec: int = 4,
+    scale_vec: int | None = None,
     kind: str | None = None,
     scale_a: Sequence[Sequence[int]] | None = None,
     scale_b: Sequence[Sequence[int]] | None = None,

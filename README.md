@@ -12,13 +12,17 @@ The package contains only:
 - documentation of the input formats, fixed-precision accumulator, scaling,
   sparse selection, rounding, and special values.
 
+It does not contain CUDA executables, hardware-discovery tooling, or research
+artifacts.
+
 ## Supported arithmetic
 
 - Dense and sparse TF32, BF16, and F16
 - Dense and sparse E4M3, E5M2, E2M3, E3M2, and E2M1
 - Mixed f8/f6/f4 A and B formats, with F32 or F16 D
 - U8/S8 integer MMA with wrapping or saturating S32 accumulation
-- UE8M0 block-scaled MXF8F6F4, MXF4, and MXF4NVF4 (`scale_vec::2X/4X`)
+- UE8M0 block-scaled MXF8F6F4 (`scale_vec::1X`), MXF4 (`2X`), and
+  MXF4NVF4 (`2X`/`4X`)
 - UE4M3-scaled NVFP4 (`scale_vec::4X`), dense and sparse
 
 The model operates on logical matrix elements. Descriptor construction, TMEM
@@ -66,7 +70,8 @@ word = mma_dot(a=(0x3f800000,) * 8,
 assert word == 0x41000000  # 8.0f
 ```
 
-Block scales are supplied per logical K block:
+Block scales are supplied per physical K block. Sparse calls still take full
+logical-K inputs; the API applies metadata before assigning scale blocks:
 
 ```python
 word = mma_dot(

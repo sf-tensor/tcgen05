@@ -5,8 +5,15 @@ import argparse
 import json
 import random
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tcgen05_model import mma_dot as public_mma_dot
 
 from mma_probe.formats import bits_to_f32, f32_class
 from mma_probe.harness import MmaHarness, ProbeCase
@@ -245,8 +252,7 @@ def cmd_random(args: argparse.Namespace) -> int:
         "position_failures": position_failures,
         "shown_mismatches": mismatches,
     }
-    print(json.dumps(report, indent=2, sort_keys=True))
-    return 0
+    return _emit_validation_report(report)
 
 
 def _random_f32_word(rng: random.Random, *, finite_only: bool) -> int:
@@ -2542,37 +2548,11 @@ def _block_scaled_sparse_active_indices(kind: str, metadata: int, metadata_hi: i
     return active
 
 
-def _block_scaled_sparse_model_case(case: Tcgen05BlockScaledSparseProbeCase, kind: str):
-    if kind == "mxf8f6f4":
-        logical_indices = []
-        for chunk in range(16):
-            word = case.metadata if chunk < 8 else case.metadata_hi
-            selector = (word >> ((chunk & 7) * 4)) & 0xF
-            logical_indices.append(chunk * 4 + (selector & 0x3))
-            logical_indices.append(chunk * 4 + ((selector >> 2) & 0x3))
-    else:
-        logical_indices = []
-        for chunk in range(16):
-            word = case.metadata if chunk < 8 else case.metadata_hi
-            selector = (word >> ((chunk & 7) * 4)) & 0xF
-            for offset in range(4):
-                pair = selector & 0x3 if offset < 2 else (selector >> 2) & 0x3
-                logical_indices.append(chunk * 8 + pair * 2 + (offset & 1))
-    return SimpleNamespace(
-        a=tuple(case.a[k] for k in logical_indices),
-        b=tuple(case.b[k] for k in logical_indices),
-        c=case.c,
-        scale_a=case.scale_a,
-        scale_b=case.scale_b,
-    )
-
-
 def _run_tcgen05_block_scaled_sparse_random_validation(args: argparse.Namespace) -> dict:
     if args.kind == "mxf8f6f4":
         op = MXF8F6F4_UE8M0_FORMAT_OPS[args.format]
         a_format = args.a_format or args.format
         b_format = args.b_format or args.format
-        model = _make_tcgen05_mxf8f6f4_model(args.format, args.model, a_format, b_format)
         logical_k = 64
         scale_count = 2
         metadata_format = "fp8"
@@ -2580,13 +2560,6 @@ def _run_tcgen05_block_scaled_sparse_random_validation(args: argparse.Namespace)
         op = BLOCK_SCALED_SPARSE_OPS[args.kind]
         a_format = "e2m1"
         b_format = "e2m1"
-        if args.kind == "mxf4nvf4-4x-ue4m3":
-            model = None if args.model == "hardware-oracle" else Tcgen05RawWindowNvfp4MmaModel(
-                c_merge_group_size=32,
-                scale_block_size=32,
-            )
-        else:
-            model = _make_tcgen05_block_scaled_model(args.kind, args.model)
         logical_k = 128
         scale_count = 4
         metadata_format = "nvfp4"
@@ -2666,10 +2639,22 @@ def _run_tcgen05_block_scaled_sparse_random_validation(args: argparse.Namespace)
         if len(values) != 1:
             position_failures += 1
         observed = valid_words[0]
-        model_case = case if ue4m3_scales else _block_scaled_sparse_model_case(case, args.kind)
-        assert model is not None
-        predicted = model.eval(model_case)
-        matched = model.matches(model_case, observed)
+        public_kind = "mxf8f6f4" if args.kind == "mxf8f6f4" else "mxf4" if args.kind == "mxf4" else "mxf4nvf4"
+        public_scale_vec = 1 if args.kind == "mxf8f6f4" else 2 if args.kind in ("mxf4", "mxf4nvf4-2x") else 4
+        predicted = public_mma_dot(
+            case.a[:logical_k],
+            case.b[:logical_k],
+            case.c,
+            a_format=a_format,
+            b_format=b_format,
+            scaling="ue4m3" if ue4m3_scales else "ue8m0",
+            scale_vec=public_scale_vec,
+            kind=public_kind,
+            scale_a=case.scale_a,
+            scale_b=case.scale_b,
+            sparse_metadata=(case.metadata, case.metadata_hi),
+        )
+        matched = predicted == observed
         if not matched:
             mismatch_count += 1
             if len(mismatches) < args.show:
@@ -2707,9 +2692,7 @@ def _run_tcgen05_block_scaled_sparse_random_validation(args: argparse.Namespace)
             for lo, hi in sorted(metadata_words)[:8]
         ],
         "model": args.model,
-        "model_kind": "full-logical-K sparse NVFP4 UE4M3 block-scaled software model"
-        if ue4m3_scales
-        else "compressed-K sparse block-scaled software model",
+        "model_kind": "released public full-logical-K sparse block-scaled API",
         "random_scales": random_scales,
         "nan_scale_cases": _count_nan_scale_cases(cases, 0x7F if ue4m3_scales else 0xFF)
         if random_scales
@@ -3168,59 +3151,64 @@ def cmd_tcgen05_deep(args: argparse.Namespace) -> int:
     return 0
 
 
+def _emit_validation_report(report: dict) -> int:
+    for field in ("cases", "mismatches", "position_failures"):
+        if field not in report:
+            raise ValueError(f"validation report is missing required field {field!r}")
+        if type(report[field]) is not int or report[field] < 0:
+            raise ValueError(f"validation report field {field!r} must be a nonnegative integer")
+    if "oracle_position_failures" in report and (
+        type(report["oracle_position_failures"]) is not int or report["oracle_position_failures"] < 0
+    ):
+        raise ValueError("validation report field 'oracle_position_failures' must be a nonnegative integer")
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 1 if any(report.get(field, 0) != 0 for field in (
+        "mismatches", "position_failures", "oracle_position_failures"
+    )) else 0
+
+
 def cmd_tcgen05_random(args: argparse.Namespace) -> int:
-    print(json.dumps(_run_tcgen05_random_validation(args), indent=2, sort_keys=True))
-    return 0
+    return _emit_validation_report(_run_tcgen05_random_validation(args))
 
 
 def cmd_tcgen05_bf16_random(args: argparse.Namespace) -> int:
-    print(json.dumps(_run_tcgen05_bf16_random_validation(args), indent=2, sort_keys=True))
-    return 0
+    return _emit_validation_report(_run_tcgen05_bf16_random_validation(args))
 
 
 def cmd_tcgen05_f16_random(args: argparse.Namespace) -> int:
-    print(json.dumps(_run_tcgen05_f16_random_validation(args), indent=2, sort_keys=True))
-    return 0
+    return _emit_validation_report(_run_tcgen05_f16_random_validation(args))
 
 
 def cmd_tcgen05_fp8_random(args: argparse.Namespace) -> int:
-    print(json.dumps(_run_tcgen05_fp8_random_validation(args), indent=2, sort_keys=True))
-    return 0
+    return _emit_validation_report(_run_tcgen05_fp8_random_validation(args))
 
 
 def cmd_tcgen05_f8f6f4_random(args: argparse.Namespace) -> int:
-    print(json.dumps(_run_tcgen05_f8f6f4_random_validation(args), indent=2, sort_keys=True))
-    return 0
+    return _emit_validation_report(_run_tcgen05_f8f6f4_random_validation(args))
 
 
 def cmd_tcgen05_i8_random(args: argparse.Namespace) -> int:
-    print(json.dumps(_run_tcgen05_i8_random_validation(args), indent=2, sort_keys=True))
-    return 0
+    return _emit_validation_report(_run_tcgen05_i8_random_validation(args))
 
 
 def cmd_tcgen05_nvfp4_random(args: argparse.Namespace) -> int:
-    print(json.dumps(_run_tcgen05_nvfp4_random_validation(args), indent=2, sort_keys=True))
-    return 0
+    return _emit_validation_report(_run_tcgen05_nvfp4_random_validation(args))
 
 
 def cmd_tcgen05_mxf8f6f4_random(args: argparse.Namespace) -> int:
-    print(json.dumps(_run_tcgen05_mxf8f6f4_random_validation(args), indent=2, sort_keys=True))
-    return 0
+    return _emit_validation_report(_run_tcgen05_mxf8f6f4_random_validation(args))
 
 
 def cmd_tcgen05_block_scaled_random(args: argparse.Namespace) -> int:
-    print(json.dumps(_run_tcgen05_block_scaled_random_validation(args), indent=2, sort_keys=True))
-    return 0
+    return _emit_validation_report(_run_tcgen05_block_scaled_random_validation(args))
 
 
 def cmd_tcgen05_block_scaled_sparse_random(args: argparse.Namespace) -> int:
-    print(json.dumps(_run_tcgen05_block_scaled_sparse_random_validation(args), indent=2, sort_keys=True))
-    return 0
+    return _emit_validation_report(_run_tcgen05_block_scaled_sparse_random_validation(args))
 
 
 def cmd_tcgen05_shape_random(args: argparse.Namespace) -> int:
-    print(json.dumps(_run_tcgen05_shape_random_validation(args), indent=2, sort_keys=True))
-    return 0
+    return _emit_validation_report(_run_tcgen05_shape_random_validation(args))
 
 
 def cmd_tcgen05_shape_coordinate_map(args: argparse.Namespace) -> int:
@@ -3232,8 +3220,7 @@ def cmd_tcgen05_shape_coordinate_map(args: argparse.Namespace) -> int:
 
 
 def cmd_tcgen05_sparse_random(args: argparse.Namespace) -> int:
-    print(json.dumps(_run_tcgen05_sparse_random_validation(args), indent=2, sort_keys=True))
-    return 0
+    return _emit_validation_report(_run_tcgen05_sparse_random_validation(args))
 
 
 def cmd_tcgen05_run_case(args: argparse.Namespace) -> int:

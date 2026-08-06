@@ -9,7 +9,7 @@ description = "Bit-accurate software model of NVIDIA Blackwell tcgen05 MMA arith
 readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
-authors = [{name = "tcgen05-model contributors"}]
+authors = [{name = "San Francisco Tensor Company"}]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "License :: OSI Approved :: MIT License",

@@ -1,4 +1,4 @@
-**/__pycache__/
+__pycache__/
 *.py[cod]
 build/
 .pytest_cache/

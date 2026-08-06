@@ -110,7 +110,7 @@ def _ue8m0_vectors():
     )
 
     specs = (
-        ("mxf4", 4, 920, 2, 0x46BA8000),
+        ("mxf4", 2, 920, 2, 0x46BA8000),
         ("mxf4nvf4", 2, 921, 2, 0x40580000),
         ("mxf4nvf4", 4, 922, 4, 0xC6A88896),
     )
@@ -269,6 +269,77 @@ def validate() -> ValidationReport:
     checked += 1
     if sparse != dense_masked:
         failures.append(ValidationFailure("sparse-mask", dense_masked, sparse))
+
+    def check_public(name: str, expected: int, **kwargs) -> None:
+        nonlocal checked
+        actual = mma_dot(**kwargs)
+        checked += 1
+        if actual != expected:
+            failures.append(ValidationFailure(name, expected, actual))
+
+    # Frozen public-API sparse cases. These deliberately use full logical K;
+    # the expected words were captured from B200 sparse instructions.
+    metadata = (0x44444444, 0x44444444)
+    check_public(
+        "sparse-mxf8f6f4-logical-k-scale-association",
+        0x42000000,
+        a=(0x38,) * 64,
+        b=(0x38,) * 64,
+        a_format="e4m3",
+        scaling="ue8m0",
+        kind="mxf8f6f4",
+        scale_vec=1,
+        scale_a=(0x7F, 0x80, 0x7F, 0x7F),
+        scale_b=(0x7F,) * 4,
+        sparse_metadata=metadata,
+    )
+    pairwise_a = tuple(0x2 if k % 8 in (2, 3) else 0 for k in range(128))
+    for name, scaling, kind, scale_vec, scale in (
+        ("sparse-mxf4-pairwise", "ue8m0", "mxf4", 2, 0x7F),
+        ("sparse-mxf4nvf4-2x-pairwise", "ue8m0", "mxf4nvf4", 2, 0x7F),
+        ("sparse-mxf4nvf4-4x-pairwise", "ue8m0", "mxf4nvf4", 4, 0x7F),
+        ("sparse-nvfp4-pairwise", "ue4m3", "mxf4nvf4", 4, 0x38),
+    ):
+        check_public(
+            name,
+            0x42000000,
+            a=pairwise_a,
+            b=(0x2,) * 128,
+            a_format="e2m1",
+            scaling=scaling,
+            kind=kind,
+            scale_vec=scale_vec,
+            scale_a=(scale,) * 4,
+            scale_b=(scale,) * 4,
+            sparse_metadata=metadata,
+        )
+
+    # B200 canonicalizes an all-zero block-scaled result to +0 even when C is
+    # -0. Cover every dense block-scaled arithmetic family explicitly.
+    for format_name, scaling, kind, scale_vec, k, scale in (
+        ("e4m3", "ue8m0", "mxf8f6f4", 1, 32, 0x7F),
+        ("e5m2", "ue8m0", "mxf8f6f4", 1, 32, 0x7F),
+        ("e2m3", "ue8m0", "mxf8f6f4", 1, 32, 0x7F),
+        ("e3m2", "ue8m0", "mxf8f6f4", 1, 32, 0x7F),
+        ("e2m1", "ue8m0", "mxf8f6f4", 1, 32, 0x7F),
+        ("e2m1", "ue8m0", "mxf4", 2, 64, 0x7F),
+        ("e2m1", "ue8m0", "mxf4nvf4", 2, 64, 0x7F),
+        ("e2m1", "ue8m0", "mxf4nvf4", 4, 64, 0x7F),
+        ("e2m1", "ue4m3", "mxf4nvf4", 4, 64, 0x38),
+    ):
+        check_public(
+            f"{kind}-{format_name}-{scale_vec}x-negative-zero",
+            0,
+            a=(0,) * k,
+            b=(0,) * k,
+            c=0x80000000,
+            a_format=format_name,
+            scaling=scaling,
+            kind=kind,
+            scale_vec=scale_vec,
+            scale_a=(scale,) * 4,
+            scale_b=(scale,) * 4,
+        )
 
     return ValidationReport(checked, tuple(failures))
 

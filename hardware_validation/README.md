@@ -34,15 +34,16 @@ to each listed GPU. With one GPU, use:
 python hardware_validation/run_full_validation.py --devices 0
 ```
 
-The default is 1,000,000 cases for each of 46 arithmetic-path configurations,
-for 46,000,000 total cases. Each floating-point path is split into 500,000
+The default is 1,000,000 cases for each of 46 named harness paths, for
+46,000,000 total cases. Each floating-point path is split into 500,000
 unrestricted raw-encoding cases and 500,000 finite-focused cases. Integer paths
 run 1,000,000 raw/adversarial cases. Random scales span their complete encoded
 field, including NaN scale encodings, and sparse paths use random legal
 metadata.
 
 Progress is printed as each half completes. The process exits nonzero if a
-command fails, a model word differs, or valid output locations disagree. A
+command or worker fails, a report is malformed or incomplete, a requested path
+does not complete exactly once, a model word differs, or valid output locations disagree. A
 timestamped JSON report is written under `hardware_validation/results/`; it
 contains every concrete command, seed, raw validator report, and failure count.
 That directory is gitignored.
@@ -92,7 +93,8 @@ The driver covers:
 Mixed format permutations instantiate one shared accumulator with independently
 selected A/B decoders. The million-case matrix uses both decoder directions and
 both output widths while the same-format million-case paths exercise every
-individual decoder.
+individual decoder. It is representative coverage, not the complete mixed
+format/shape Cartesian product.
 
 The comparison is raw integer equality. NaNs must have the exact observed
 canonical payload; numerical equivalence or NaN-class equivalence is not
@@ -109,4 +111,3 @@ first word, reported as `position_failures`.
 - `src/*.cu`: instruction runners and Tensor Memory layouts needed for the
   validation paths
 - `Makefile`: `sm_100a` builds for those runners
-

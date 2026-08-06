@@ -117,9 +117,10 @@ UE8M0 is an unsigned exponent-only value:
 scale = 2**(bits - 127), bits != 0xff
 ```
 
-`0xff` is NaN. E4M3/E5M2/E2M3/E3M2 MX paths use K=32 scale blocks and the
-same 25-bit shared raw window as unscaled f8/f6/f4. Mixed A/B formats use their
-respective decoders before applying the scales.
+`0xff` is NaN. MXF8F6F4 uses `scale_vec::1X`: E4M3/E5M2/E2M3/E3M2/E2M1
+paths use K=32 physical scale blocks and the same 25-bit shared raw window as
+unscaled f8/f6/f4. Mixed A/B formats use their respective decoders before
+applying the scales.
 
 For E2M1, pass `kind="mxf8f6f4"` to select this K=32 arithmetic instead of the
 MXF4 family described below.
@@ -134,8 +135,9 @@ S = maximum nonzero (A-scale raw exponent + B-scale raw exponent)
 q = max(R - 39, S - 35, raw_exp(C) - 39 when C is nonzero)
 ```
 
-Products are formed in K=16 merge groups. `scale_vec::2X` uses one scale for
-32 K values; `scale_vec::4X` uses one for 16. When C outranks an individual
+Products are formed in K=16 merge groups. MXF4 requires `scale_vec::2X`;
+MXF4NVF4 accepts `scale_vec::2X` or `scale_vec::4X`. `2X` uses one scale for
+32 physical K values and `4X` uses one for 16. When C outranks an individual
 product group, that group is first truncated through the C-relative 35-bit
 window. The model also applies the observed `2**-174` subnormal group floor to
 lower-scale groups.
@@ -155,10 +157,11 @@ then truncated into this shared window. This ordering preserves carries within
 a four-product dot group that would be lost by per-product truncation.
 
 If nonzero C's raw exponent is at least the maximum product raw exponent, the
-datapath exposes each K=16 block separately: each exact block sum is truncated
-to `q = raw_exp(C) - 35`, then the block units and C units are added. Sparse
-NVFP4 uses K=32 scale/merge blocks because each stored sparse block represents
-twice as much logical K.
+datapath exposes each K=16 physical block separately: each exact block sum is
+truncated to `q = raw_exp(C) - 35`, then the block units and C units are added.
+For sparse input, each stored physical block represents twice as much logical
+K; the public API compresses metadata-selected logical lanes before assigning
+these physical blocks.
 
 ## 6. Integer MMA
 
@@ -180,11 +183,14 @@ nibble first.
 - BF16, F16, and f8/f6/f4 select two elements per four. The low and high
   2-bit fields identify the two positions; legal selectors are
   `4, 8, c, 9, d, 6, e`.
-- NVFP4 interprets those two fields as adjacent pairs within each eight-wide
-  chunk, selecting four logical values.
+- MXF4 and MXF4NVF4, under either UE8M0 or UE4M3 scaling, interpret those two
+  fields as adjacent pairs within each eight-wide chunk, selecting four
+  logical values. Other f8/f6/f4 families use 2:4 selection.
 
-`sparse_active_indices` exposes this decoder. `mma_dot` and `mma` accept full
-logical-K matrices and remove all disabled A/B positions before arithmetic.
+`sparse_active_indices` exposes this decoder; pass `kind="mxf4"` or
+`kind="mxf4nvf4"` for pairwise 4:8. `mma_dot` and `mma` accept full logical-K
+matrices and remove all disabled A/B positions before arithmetic. Block-scaled
+sparse paths compress selected A/B lanes to physical K before scale assignment.
 
 ## 8. Public API
 
@@ -198,6 +204,12 @@ logical-K matrices and remove all disabled A/B positions before arithmetic.
 The concrete classes in `tcgen05_model.model` remain available for callers
 that need to select a particular accumulator family directly. `make_model` is
 preferred because it checks descriptor combinations.
+
+`make_model` accepts only B200-supported descriptor families: TF32/TF32 with
+F32 D; matching BF16 or F16 inputs (F16 D only with F16 inputs); arbitrary
+f8/f6/f4 A/B combinations with F32 or F16 D; U8/S8 with S32 D; and the exact
+block-scale kind/scale-vector combinations described above. Unsupported names
+and cross-family combinations raise `ValueError`.
 
 ## 9. Validation and confidence
 

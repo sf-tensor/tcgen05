@@ -9,6 +9,8 @@ import queue
 import subprocess
 import sys
 import threading
+import traceback
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -231,11 +233,21 @@ def _json_report(stdout: str) -> dict:
 
 
 def _report_failed(report: dict) -> bool:
+    required_fields = ("cases", "mismatches", "position_failures")
+    missing = [field for field in required_fields if field not in report]
+    if missing:
+        raise ValueError(f"validator report is missing required fields: {', '.join(missing)}")
+    for field in required_fields:
+        if type(report[field]) is not int or report[field] < 0:
+            raise ValueError(f"validator report field {field!r} must be a nonnegative integer")
     failure_fields = (
         "mismatches",
         "position_failures",
         "oracle_position_failures",
     )
+    for field in failure_fields:
+        if field in report and (type(report[field]) is not int or report[field] < 0):
+            raise ValueError(f"validator report field {field!r} must be a nonnegative integer")
     return any(report.get(field, 0) != 0 for field in failure_fields)
 
 
@@ -254,9 +266,11 @@ def _run_path(spec: PathValidation, device: int) -> dict:
         )
         try:
             report = _json_report(completed.stdout)
+            report_failed = _report_failed(report)
         except Exception as error:
-            report = {"parse_error": str(error), "output": completed.stdout[-8000:]}
-        run_failed = completed.returncode != 0 or "parse_error" in report or _report_failed(report)
+            report = {"report_error": str(error), "output": completed.stdout[-8000:]}
+            report_failed = True
+        run_failed = completed.returncode != 0 or report_failed
         failed |= run_failed
         run_reports.append(
             {
@@ -320,10 +334,21 @@ def main(argv: list[str] | None = None) -> int:
                 spec = pending.get_nowait()
             except queue.Empty:
                 return
-            result = _run_path(spec, device)
+            try:
+                result = _run_path(spec, device)
+            except Exception as error:
+                result = {
+                    "path": spec.name,
+                    "device": device,
+                    "failed": True,
+                    "worker_error": f"{type(error).__name__}: {error}",
+                    "traceback": traceback.format_exc(),
+                    "runs": [],
+                }
+            finally:
+                pending.task_done()
             with lock:
                 results.append(result)
-            pending.task_done()
 
     threads = [threading.Thread(target=worker, args=(device,), daemon=False) for device in args.devices]
     for thread in threads:
@@ -332,7 +357,27 @@ def main(argv: list[str] | None = None) -> int:
         thread.join()
 
     results.sort(key=lambda result: result["path"])
-    failed_paths = [result["path"] for result in results if result["failed"]]
+    requested_paths = [spec.name for spec in matrix]
+    completed_counts = Counter(result["path"] for result in results)
+    missing_paths = sorted(set(requested_paths) - set(completed_counts))
+    duplicate_paths = sorted(path for path, count in completed_counts.items() if count != 1)
+    unexpected_paths = sorted(set(completed_counts) - set(requested_paths))
+    integrity_errors = []
+    if missing_paths:
+        integrity_errors.append(f"missing paths: {', '.join(missing_paths)}")
+    if duplicate_paths:
+        integrity_errors.append(f"duplicate paths: {', '.join(duplicate_paths)}")
+    if unexpected_paths:
+        integrity_errors.append(f"unexpected paths: {', '.join(unexpected_paths)}")
+    failed_paths = sorted(
+        set(result["path"] for result in results if result["failed"]) | set(missing_paths)
+    )
+    total_cases = sum(
+        run["report"]["cases"]
+        for result in results
+        for run in result.get("runs", ())
+        if isinstance(run.get("report"), dict) and type(run["report"].get("cases")) is int
+    )
     output = args.output
     if output is None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -343,10 +388,12 @@ def main(argv: list[str] | None = None) -> int:
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "cases_per_path": args.cases_per_path,
+        "requested_path_count": len(matrix),
         "path_count": len(results),
-        "total_cases": args.cases_per_path * len(results),
+        "total_cases": total_cases,
         "devices": args.devices,
         "failed_paths": failed_paths,
+        "integrity_errors": integrity_errors,
         "results": results,
     }
     output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -355,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
         f"failed={len(failed_paths)} output={output}",
         flush=True,
     )
-    return 1 if failed_paths else 0
+    return 1 if failed_paths or integrity_errors else 0
 
 
 if __name__ == "__main__":
