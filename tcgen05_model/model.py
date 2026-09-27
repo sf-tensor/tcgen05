@@ -356,6 +356,9 @@ def _round_int_to_f16(mant: int, value_exp: int, *, mode: str = "rz") -> int:
 class _Tcgen05RawWindowMmaModel(_ModelBase):
     input_format = "unknown"
     product_window_fraction_bits = 25
+    # Lowest window exponent; BF16/TF32 products can fall below the FP32
+    # subnormal range, where hardware stops refining the window.
+    min_window_raw_exponent: int | None = None
 
     def __init__(self):
         # Generated NaNs use the exact tcgen05 word rather than an arbitrary
@@ -434,7 +437,10 @@ class _Tcgen05RawWindowMmaModel(_ModelBase):
         if not raw_exponents:
             return F32_POS_ZERO
 
-        quantum_exp = max(raw_exponents) - self.product_window_fraction_bits
+        window_exp = max(raw_exponents)
+        if self.min_window_raw_exponent is not None:
+            window_exp = max(window_exp, self.min_window_raw_exponent)
+        quantum_exp = window_exp - self.product_window_fraction_bits
         units = sum(_trunc_int_to_quantum(mant, exp, quantum_exp) for mant, exp in finite_terms)
         return self._round_output(units, quantum_exp)
 
@@ -446,13 +452,14 @@ class Tcgen05RawWindowTf32MmaModel(_Tcgen05RawWindowMmaModel):
     - A/B are truncated to TF32 before classification.
     - Each product contributes to one shared raw-exponent window.
     - The window exponent is max(product operand exponent sums, C exponent) minus
-      25 fractional bits.
+      25 fractional bits, with the window exponent clamped to at least -133.
     - Every product and C is shifted directly into that window with truncation
       toward zero, then the signed integer terms are summed.
     - The final finite result is converted to float32 by truncating magnitude.
     """
 
     input_format = "tf32"
+    min_window_raw_exponent = -133
 
     def _decode_input(self, bits: int) -> tuple[int, int, int] | str:
         return _decode_tf32_int(bits)
@@ -466,6 +473,7 @@ class Tcgen05RawWindowBf16MmaModel(_Tcgen05RawWindowMmaModel):
     """
 
     input_format = "bf16"
+    min_window_raw_exponent = -133
 
     def _decode_input(self, bits: int) -> tuple[int, int, int] | str:
         return _decode_bf16_int(bits)

@@ -136,3 +136,34 @@ def test_block_scaled_zero_canonicalizes_negative_zero(a_format, scaling, kind, 
         scale_a=(scale,) * 4,
         scale_b=(scale,) * 4,
     ) == 0
+
+
+@pytest.mark.parametrize(
+    ("a_format", "a", "b", "expected"),
+    [
+        (
+            "bf16",
+            [0x18420000, 0x98840000, 0x988B0000, 0x99ED0000, 0x18B80000, 0x98FA0000, 0x993A0000, 0x99A50000,
+             0x19950000, 0x186D0000, 0x98330000, 0x988F0000, 0x976D0000, 0x98270000, 0x19770000, 0x99870000],
+            [0x19220000, 0x99AB0000, 0x996C0000, 0x99DF0000, 0x19690000, 0x991C0000, 0x98DF0000, 0x99AB0000,
+             0x18740000, 0x998C0000, 0x98AC0000, 0x98080000, 0x98290000, 0x994C0000, 0x193C0000, 0x98F30000],
+            0x00000000,
+        ),
+        (
+            "bf16",
+            [0x9B940000, 0x19F30000, 0x9A2E0000, 0x1A670000, 0x9A250000, 0x9B4E0000, 0x9B290000, 0x9A330000,
+             0x99E00000, 0x1A140000, 0x99140000, 0x99D10000, 0x9AE90000, 0x1B1A0000, 0x9A9C0000, 0x1B3A0000],
+            [0x9AAF0000, 0x99F30000, 0x9ACC0000, 0x1B7C0000, 0x19ED0000, 0x1B250000, 0x9A1B0000, 0x9A200000,
+             0x9AF70000, 0x9A480000, 0x1AE10000, 0x1B320000, 0x1B120000, 0x1B0E0000, 0x9A680000, 0x17350000],
+            0x0000000B,
+        ),
+        (
+            "tf32",
+            [0x01C276FF, 0xB619A5D4, 0xA901AEAD, 0x87AC9D0C, 0x80001B54, 0x21D6A5D3, 0x36C6908E, 0x8D1E7673],
+            [0x375008D5, 0x82CA0FEF, 0x8F72B73B, 0x3140C1A1, 0x170D8DC9, 0x159F25F6, 0x80B19B4F, 0x2B85B881],
+            0x000001FE,
+        ),
+    ],
+)
+def test_subnormal_window_floor(a_format, a, b, expected):
+    assert mma_dot(a=a, b=b, c=0, a_format=a_format) == expected
