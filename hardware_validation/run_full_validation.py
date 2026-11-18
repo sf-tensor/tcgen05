@@ -208,6 +208,27 @@ def validation_matrix(cases: int) -> tuple[PathValidation, ...]:
             ),
             92705,
         ),
+        (
+            "mixed-e5m2-e2m1-f16",
+            (
+                "tcgen05-shape-random",
+                "--format",
+                "e5m2",
+                "--a-format",
+                "e5m2",
+                "--b-format",
+                "e2m1",
+                "--d-type",
+                "f16",
+                "--m",
+                "64",
+                "--n",
+                "8",
+                "--batch-size",
+                "20000",
+            ),
+            92707,
+        ),
     )
     for name, command, mixed_seed in mixed:
         paths.append(PathValidation(name, _split_runs(command, cases, mixed_seed)))
@@ -220,7 +241,7 @@ def validation_matrix(cases: int) -> tuple[PathValidation, ...]:
     )
     paths.append(PathValidation("dense-nvfp4", _split_runs(nvfp4, cases, 92801)))
 
-    assert len(paths) == 46, len(paths)
+    assert len(paths) == 47, len(paths)
     return tuple(paths)
 
 
