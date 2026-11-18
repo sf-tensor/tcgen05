@@ -11,7 +11,7 @@ RUNNERS := $(patsubst src/%.cu,$(BUILD_DIR)/%,$(SOURCES))
 all: $(RUNNERS)
 
 $(BUILD_DIR)/%: src/%.cu | $(BUILD_DIR)
-	$(NVCC) $(CXXFLAGS) $(CUDAFLAGS) -arch=sm_100a -lineinfo -o $@ $<
+	$(NVCC) $(CXXFLAGS) $(CUDAFLAGS) -gencode arch=compute_100a,code=sm_100a -lineinfo -o $@ $<
 
 $(BUILD_DIR):
 	mkdir -p $@
